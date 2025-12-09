@@ -52,6 +52,7 @@ type SearchRequest struct {
 	Score            string            `json:"score,omitempty"`
 	SearchAfter      []string          `json:"search_after"`
 	SearchBefore     []string          `json:"search_before"`
+	Collapse         *search.CollapseRequest  `json:"collapse,omitempty"`
 
 	KNN         []*KNNRequest `json:"knn"`
 	KNNOperator knnOperator   `json:"knn_operator"`
@@ -149,6 +150,7 @@ func (r *SearchRequest) UnmarshalJSON(input []byte) error {
 		Score            string            `json:"score"`
 		SearchAfter      []string          `json:"search_after"`
 		SearchBefore     []string          `json:"search_before"`
+		Collapse         *CollapseRequest  `json:"collapse"`
 		KNN              []*tempKNNReq     `json:"knn"`
 		KNNOperator      knnOperator       `json:"knn_operator"`
 		PreSearchData    json.RawMessage   `json:"pre_search_data"`
@@ -183,6 +185,7 @@ func (r *SearchRequest) UnmarshalJSON(input []byte) error {
 	r.Score = temp.Score
 	r.SearchAfter = temp.SearchAfter
 	r.SearchBefore = temp.SearchBefore
+	r.Collapse = temp.Collapse
 	r.Query, err = query.ParseQuery(temp.Q)
 	if err != nil {
 		return err
@@ -263,6 +266,7 @@ func copySearchRequest(req *SearchRequest, preSearchData map[string]interface{})
 		Score:            req.Score,
 		SearchAfter:      req.SearchAfter,
 		SearchBefore:     req.SearchBefore,
+		Collapse:         req.Collapse,
 		KNN:              req.KNN,
 		KNNOperator:      req.KNNOperator,
 		PreSearchData:    preSearchData,
