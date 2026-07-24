@@ -110,6 +110,19 @@ func (s *Scorch) persisterLoop() {
 	var persistWatchers []*epochWatcher
 	var lastPersistedEpoch, lastMergedEpoch uint64
 	var ew *epochWatcher
+	var lastForcedPurge time.Time
+
+	// One ticker serves every parked select below. The loop-head pass only
+	// runs while the loop iterates; a persister parked waiting on the
+	// introducer never reaches it — and a merge-abort storm (a plan whose
+	// later task fails after an earlier task succeeded) orphans unmarked
+	// outputs at replan rate with nothing sweeping them.
+	var forcedPurgeCh <-chan time.Time
+	if ForcedPurgeInterval > 0 {
+		forcedPurgeTicker := time.NewTicker(ForcedPurgeInterval)
+		defer forcedPurgeTicker.Stop()
+		forcedPurgeCh = forcedPurgeTicker.C
+	}
 
 	var unpersistedCallbacks []index.BatchCallback
 
@@ -126,6 +139,18 @@ func (s *Scorch) persisterLoop() {
 OUTER:
 	for {
 		atomic.AddUint64(&s.stats.TotPersistLoopBeg, 1)
+
+		// Cleanup is otherwise only attempted while the persister waits for
+		// changes (below) or inside the merger-catch-up pause - both are
+		// unreachable on an index under sustained mutation, so obsolete files
+		// accumulate at churn rate until the process restarts. Force a
+		// periodic pass regardless of load.
+		if ForcedPurgeInterval > 0 && time.Since(lastForcedPurge) >= ForcedPurgeInterval {
+			if ok := s.fireEvent(EventKindPurgerCheck, 0); ok {
+				s.removeOldData()
+			}
+			lastForcedPurge = time.Now()
+		}
 
 		select {
 		case <-s.closeCh:
@@ -255,6 +280,12 @@ OUTER:
 			// if the watchers are already caught up then let them wait,
 			// else let them continue to do the catch up
 			persistWatchers = append(persistWatchers, ew)
+		case <-forcedPurgeCh:
+			// nothing introduced, nothing persisted — but aborted merge
+			// plans may have orphaned already-unmarked outputs
+			if ok := s.fireEvent(EventKindPurgerCheck, 0); ok {
+				s.removeOldData()
+			}
 		}
 
 		atomic.AddUint64(&s.stats.TotPersistLoopEnd, 1)
@@ -318,6 +349,20 @@ func (s *Scorch) pausePersisterForMergerCatchUp(lastPersistedEpoch uint64,
 	// Persister pause until the merger catches up to reduce the segment
 	// file count under the threshold.
 	// But if there is memory pressure, then skip this sleep maneuvers.
+	// The nap below blocks on merger progress. If the merger is itself
+	// starved (e.g. a large FST merge on a constrained CPU), that signal may
+	// not come for hours - and with the persister napping, nothing ever
+	// deletes obsolete files, so the file count that keeps this loop alive
+	// only grows: a livelock. Run the purger on a ticker inside the nap; a
+	// successful sweep drops numFilesOnDisk below the threshold and exits
+	// the loop without requiring merger progress.
+	var napPurgeCh <-chan time.Time
+	if ForcedPurgeInterval > 0 {
+		napPurgeTicker := time.NewTicker(ForcedPurgeInterval)
+		defer napPurgeTicker.Stop()
+		napPurgeCh = napPurgeTicker.C
+	}
+
 OUTER:
 	for po.PersisterNapUnderNumFiles > 0 &&
 		numFilesOnDisk >= uint64(po.PersisterNapUnderNumFiles) &&
@@ -330,6 +375,10 @@ OUTER:
 		case ew := <-s.persisterNotifier:
 			persistWatchers = append(persistWatchers, ew)
 			lastMergedEpoch = ew.epoch
+		case <-napPurgeCh:
+			if ok := s.fireEvent(EventKindPurgerCheck, 0); ok {
+				s.removeOldData()
+			}
 		}
 
 		atomic.AddUint64(&s.stats.TotPersisterSlowMergerResume, 1)
@@ -1093,6 +1142,12 @@ func (s *Scorch) removeOldData() {
 // keep around per Scorch instance.  Useful for apps that require
 // rollback'ability.
 var NumSnapshotsToKeep = 1
+
+// ForcedPurgeInterval forces a removeOldData pass from the persister loop at
+// least this often even when the index never goes idle. Without it, cleanup
+// runs only when the persister catches up and waits, which never happens
+// under sustained mutation. 0 restores the idle-only behavior.
+var ForcedPurgeInterval = time.Minute
 
 // RollbackSamplingInterval controls how far back we are looking
 // in the history to get the rollback points.
