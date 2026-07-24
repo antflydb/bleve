@@ -762,6 +762,47 @@ func TestPlanMaxSegmentFileSize(t *testing.T) {
 	}
 }
 
+func TestPlanMaxMergePlanInputSizeNonVector(t *testing.T) {
+	segments := []Segment{
+		&segment{MyId: 1, MyFullSize: 100, MyLiveSize: 100, MyFileSize: 40},
+		&segment{MyId: 2, MyFullSize: 90, MyLiveSize: 90, MyFileSize: 40},
+		&segment{MyId: 3, MyFullSize: 80, MyLiveSize: 80, MyFileSize: 40},
+		&segment{MyId: 4, MyFullSize: 70, MyLiveSize: 70, MyFileSize: 40},
+		&segment{MyId: 5, MyFullSize: 60, MyLiveSize: 60, MyFileSize: 40},
+		&segment{MyId: 6, MyFullSize: 50, MyLiveSize: 50, MyFileSize: 40},
+	}
+	options := &MergePlanOptions{
+		MaxSegmentSize:        10_000,
+		MaxSegmentsPerTier:    1,
+		SegmentsPerMergeTask:  2,
+		TierGrowth:            2,
+		FloorSegmentSize:      1,
+		MaxMergePlanInputSize: 100,
+	}
+
+	plan, err := Plan(segments, options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan.Tasks) != 1 {
+		t.Fatalf("expected one capped task, got %d", len(plan.Tasks))
+	}
+
+	var inputSize int64
+	for _, task := range plan.Tasks {
+		for _, segment := range task.Segments {
+			if segment.HasVector() {
+				t.Fatal("test requires ordinary non-vector segments")
+			}
+			inputSize += segment.FileSize()
+		}
+	}
+	if inputSize > options.MaxMergePlanInputSize {
+		t.Fatalf("planned input size %d exceeds cap %d",
+			inputSize, options.MaxMergePlanInputSize)
+	}
+}
+
 func TestSingleTaskMergePlan(t *testing.T) {
 	o := &DefaultMergePlanOptions
 	o.FloorSegmentFileSize = 209715200

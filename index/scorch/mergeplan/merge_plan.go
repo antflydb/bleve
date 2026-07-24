@@ -86,6 +86,15 @@ type MergePlanOptions struct {
 	// contain vectors that are too large.
 	MaxSegmentFileSize int64
 
+	// Max summed size (in bytes) of persisted segment inputs scheduled
+	// across the output-producing tasks in a single merge plan. A value
+	// <= 0 disables the limit.
+	//
+	// Merge executors may retain every task's output until the whole plan
+	// is introduced. Limiting each task independently does not bound that
+	// aggregate staging footprint, so this limit is enforced plan-wide.
+	MaxMergePlanInputSize int64
+
 	// The growth factor for each tier in a staircase of idealized
 	// segments computed by CalcBudget().
 	TierGrowth float64
@@ -238,6 +247,7 @@ func plan(segmentsIn []Segment, o *MergePlanOptions) (*MergePlan, error) {
 	}
 
 	rv := &MergePlan{}
+	var mergePlanInputSize int64
 
 	var empties []Segment
 	for _, eligible := range eligibles {
@@ -265,25 +275,32 @@ func plan(segmentsIn []Segment, o *MergePlanOptions) (*MergePlan, error) {
 		for startIdx := 0; startIdx < len(eligibles); startIdx++ {
 			roster := rosterBuf[:0]
 			var rosterLiveSize int64
-			var rosterFileSize int64 // useful for segments with vectors
+			var rosterFileSize int64
+			var rosterVectorFileSize int64
 
 			for idx := startIdx; idx < len(eligibles) && len(roster) < o.SegmentsPerMergeTask; idx++ {
 				eligible := eligibles[idx]
+				eligibleFileSize := eligible.FileSize()
 
 				if rosterLiveSize+eligible.LiveSize() >= o.MaxSegmentSize {
 					continue
 				}
 
 				if eligible.HasVector() {
-					efs := eligible.FileSize()
-					if rosterFileSize+efs >= o.MaxSegmentFileSize {
+					if rosterVectorFileSize+eligibleFileSize >= o.MaxSegmentFileSize {
 						continue
 					}
-					rosterFileSize += efs
+					rosterVectorFileSize += eligibleFileSize
+				}
+
+				if o.MaxMergePlanInputSize > 0 &&
+					eligibleFileSize > o.MaxMergePlanInputSize-mergePlanInputSize-rosterFileSize {
+					continue
 				}
 
 				roster = append(roster, eligible)
 				rosterLiveSize += eligible.LiveSize()
+				rosterFileSize += eligibleFileSize
 			}
 
 			if len(roster) > 0 {
@@ -303,6 +320,9 @@ func plan(segmentsIn []Segment, o *MergePlanOptions) (*MergePlan, error) {
 		// create tasks with valid merges - i.e. there should be at least 2 non-empty segments
 		if len(bestRoster) > 1 {
 			rv.Tasks = append(rv.Tasks, &MergeTask{Segments: bestRoster})
+			for _, segment := range bestRoster {
+				mergePlanInputSize += segment.FileSize()
+			}
 		}
 
 		eligibles = removeSegments(eligibles, bestRoster)

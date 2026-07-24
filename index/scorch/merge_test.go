@@ -26,6 +26,25 @@ import (
 	index "github.com/blevesearch/bleve_index_api"
 )
 
+func TestParseMergePlannerOptionsMaxMergePlanInputSize(t *testing.T) {
+	s := &Scorch{
+		config: map[string]interface{}{
+			"scorchMergePlanOptions": map[string]interface{}{
+				"maxMergePlanInputSize": int64(256 << 20),
+			},
+		},
+	}
+
+	options, err := s.parseMergePlannerOptions()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if options.MaxMergePlanInputSize != 256<<20 {
+		t.Fatalf("expected max merge plan input size %d, got %d",
+			256<<20, options.MaxMergePlanInputSize)
+	}
+}
+
 func TestObsoleteSegmentMergeIntroduction(t *testing.T) {
 	testConfig := CreateConfig("TestObsoleteSegmentMergeIntroduction")
 	err := InitTest(testConfig)
@@ -225,7 +244,7 @@ func setupBenchIndex(b *testing.B, name string, numBatches, docsPerBatch int) (*
 
 func BenchmarkForceMerge(b *testing.B) {
 	for _, tc := range []struct {
-		batches     int
+		batches      int
 		docsPerBatch int
 	}{
 		{10, 100},
